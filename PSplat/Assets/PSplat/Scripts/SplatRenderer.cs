@@ -1,75 +1,94 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEditor;
 
 [ExecuteAlways]
 public class SplatRenderer : MonoBehaviour
 {
     public Material splatMaterial;
-    public int splatCount = 100;
-    public float spread = 5f;
+    public Mesh quadMesh;
+    public int splatCount = 1000000;
+    public float spread = 10f;
 
-    private Mesh quadMesh;
-    private Matrix4x4[] matrices;
+    private ComputeBuffer splatBuffer;
+    private ComputeBuffer argsBuffer;
+
+    private int previousSplatCount = -1;
+
+
+    void OnValidate()
+    {
+        if (splatCount != previousSplatCount)
+        {
+            Debug.Log($"[Editor] Splat count changed: {previousSplatCount} → {splatCount}");
+            ReinitBuffers();
+        }
+    }
+
+    void ReinitBuffers()
+    {
+        ReleaseBuffers();
+        InitBuffers();
+        previousSplatCount = splatCount;
+    }
+
 
     void OnEnable()
     {
-        InitSplats();
-        SceneView.duringSceneGui += RenderInSceneView;
+        InitBuffers();
+        previousSplatCount = splatCount;
+        SceneView.duringSceneGui += RenderScene;
     }
 
     void OnDisable()
     {
-        SceneView.duringSceneGui -= RenderInSceneView;
+        SceneView.duringSceneGui -= RenderScene;
+        ReleaseBuffers();
     }
 
-    void OnValidate()
+    void InitBuffers()
     {
-        InitSplats();
-    }
+        if (quadMesh == null)
+            quadMesh = Resources.GetBuiltinResource<Mesh>("Quad.fbx");
 
-    void InitSplats()
-    {
-        quadMesh = CreateQuad();
-        matrices = new Matrix4x4[splatCount];
-
-        for (int i = 0; i < splatCount; i++)
+        // Fill splat data
+        var splats = new SplatData[splatCount];
+        for (int i = 0; i < splats.Length; i++)
         {
-            Vector3 pos = new Vector3(
-                Random.Range(-spread, spread),
-                Random.Range(-spread, spread),
-                Random.Range(-spread, spread)
-            );
-            matrices[i] = Matrix4x4.TRS(pos, Quaternion.identity, Vector3.one * 0.3f);
-        }
-    }
-
-    void RenderInSceneView(SceneView sceneView)
-    {
-        if (splatMaterial == null || quadMesh == null || matrices == null) return;
-
-        for (int i = 0; i < matrices.Length; i++)
-        {
-            Graphics.DrawMesh(quadMesh, matrices[i], splatMaterial, 0, sceneView.camera);
+            splats[i].position = Random.insideUnitSphere * spread;
+            splats[i].size = Random.Range(0.01f, 0.05f);
+            splats[i].color = Color.Lerp(Color.yellow, Color.red, Random.value);
         }
 
-        SceneView.RepaintAll(); // Keep drawing in Edit mode
+        // Allocate compute buffer
+        int stride = sizeof(float) * (3 + 1 + 4); // pos + size + color
+        splatBuffer = new ComputeBuffer(splatCount, stride);
+        splatBuffer.SetData(splats);
+        splatMaterial.SetBuffer("_Splats", splatBuffer);
+
+        // Setup indirect args buffer
+        uint[] args = new uint[5] { 0, 0, 0, 0, 0 };
+        args[0] = (quadMesh != null) ? quadMesh.GetIndexCount(0) : 0;
+        args[1] = (uint)splatCount;
+        args[2] = (quadMesh != null) ? quadMesh.GetIndexStart(0) : 0;
+        args[3] = (quadMesh != null) ? quadMesh.GetBaseVertex(0) : 0;
+        args[4] = 0;
+        argsBuffer = new ComputeBuffer(1, args.Length * sizeof(uint), ComputeBufferType.IndirectArguments);
+        argsBuffer.SetData(args);
     }
 
-    Mesh CreateQuad()
+    void ReleaseBuffers()
     {
-        Mesh mesh = new Mesh();
-        mesh.vertices = new Vector3[]
-        {
-            new Vector3(-0.5f, -0.5f, 0),
-            new Vector3( 0.5f, -0.5f, 0),
-            new Vector3(-0.5f,  0.5f, 0),
-            new Vector3( 0.5f,  0.5f, 0),
-        };
-        mesh.uv = new Vector2[]
-        {
-            new Vector2(0,0), new Vector2(1,0), new Vector2(0,1), new Vector2(1,1)
-        };
-        mesh.triangles = new int[] { 0, 2, 1, 2, 3, 1 };
-        return mesh;
+        splatBuffer?.Release();
+        argsBuffer?.Release();
+    }
+
+    void RenderScene(SceneView sceneView)
+    {
+        if (!splatMaterial || splatBuffer == null || argsBuffer == null) return;
+
+        var bounds = new Bounds(Vector3.zero, Vector3.one * spread * 2f);
+        Graphics.DrawMeshInstancedIndirect(quadMesh, 0, splatMaterial, bounds, argsBuffer, 0, null, UnityEngine.Rendering.ShadowCastingMode.Off, false, 0, sceneView.camera);
+
+        SceneView.RepaintAll();
     }
 }
